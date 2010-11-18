@@ -1,24 +1,26 @@
 package layermover;
 
-import static org.openstreetmap.josm.tools.I18n.tr;
-
+import java.awt.AWTEvent;
 import java.awt.BasicStroke;
 import java.awt.Cursor;
 import java.awt.Graphics2D;
 import java.awt.Point;
+import java.awt.Toolkit;
+import java.awt.event.AWTEventListener;
 import java.awt.event.ActionEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
+import java.awt.event.MouseMotionListener;
 import java.awt.geom.GeneralPath;
 import java.awt.geom.Point2D;
 import java.util.Collections;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 
 import org.openstreetmap.josm.Main;
 import org.openstreetmap.josm.actions.PasteAction;
-import org.openstreetmap.josm.actions.mapmode.MapMode;
+import org.openstreetmap.josm.actions.mapmode.SelectAction;
 import org.openstreetmap.josm.data.Bounds;
 import org.openstreetmap.josm.data.osm.BBox;
 import org.openstreetmap.josm.data.osm.DataSet;
@@ -30,7 +32,6 @@ import org.openstreetmap.josm.data.osm.Way;
 import org.openstreetmap.josm.data.osm.visitor.AbstractVisitor;
 import org.openstreetmap.josm.data.osm.visitor.paint.MapPaintSettings;
 import org.openstreetmap.josm.data.osm.visitor.paint.PaintColors;
-import org.openstreetmap.josm.gui.MapFrame;
 import org.openstreetmap.josm.gui.MapView;
 import org.openstreetmap.josm.gui.NavigatableComponent;
 import org.openstreetmap.josm.gui.layer.Layer;
@@ -38,19 +39,40 @@ import org.openstreetmap.josm.gui.layer.MapViewPaintable;
 import org.openstreetmap.josm.gui.layer.OsmDataLayer;
 import org.openstreetmap.josm.tools.ImageProvider;
 import org.openstreetmap.josm.tools.Predicate;
-import org.openstreetmap.josm.tools.Shortcut;
 
-public class LayerMoveAction extends MapMode implements MapViewPaintable {
+public class SelectMapModeHook implements MapViewPaintable, AWTEventListener, MouseMotionListener, MouseListener {
     DataSet sourceLayer;
     private OsmPrimitive highlighted = null;
     private boolean highlightChanged;
-   
-    public LayerMoveAction(MapFrame mapFrame) {
-        super(tr("Calque"), "calque", tr("Move objects from inactive layer to active"),
-                Shortcut.registerShortcut("mapmode:calque",
-                        tr("Mode: {0}", tr("Calque")),
-                        KeyEvent.VK_K, Shortcut.GROUP_EDIT),
-                mapFrame, getCursor());
+    private boolean hookset = false;
+    private boolean hookActive = false;
+    private MapView mv;
+    private SelectAction hookedMapMode;
+    private Cursor oldCursor;
+    private final Cursor cursor;
+
+    public SelectMapModeHook() {
+        cursor = getCursor();
+    }
+
+    public void setupHook() {
+        if (hookset) return;
+        try {
+            Toolkit.getDefaultToolkit().addAWTEventListener(this, AWTEvent.KEY_EVENT_MASK);
+        } catch (SecurityException ex) {
+        }
+        hookset = true;
+    }
+
+    public void unsetupHook() {
+        if (!hookset) return;
+        deactivateHook();
+        ctrlShiftDown = false;
+        try {
+            Toolkit.getDefaultToolkit().removeAWTEventListener(this);
+        } catch (SecurityException ex) {
+        }
+        hookset = false;
     }
 
     private static Cursor getCursor() {
@@ -61,56 +83,80 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
         return Cursor.getPredefinedCursor(Cursor.CROSSHAIR_CURSOR);
     }
 
-    @Override
-    public void enterMode() {
-        super.enterMode();
-        List<OsmDataLayer> layers = Main.map.mapView.getLayersOfType(OsmDataLayer.class);
+    public void activateHook() {
+        // sanity checks
+        if (hookActive) return;
+        if (Main.map == null || Main.map.mapView == null) return;
+        if (!(Main.map.mapMode instanceof SelectAction)) return;
+        mv = Main.map.mapView;
+
+        List<OsmDataLayer> layers = mv.getLayersOfType(OsmDataLayer.class);
         for (OsmDataLayer layer : layers) {
-            if (layer.isVisible() && layer != Main.map.mapView.getEditLayer()) {
+            if (layer.isVisible() && layer != mv.getEditLayer()) {
                 sourceLayer = layer.data;
                 break;
             }
         }
-        Main.map.mapView.addMouseMotionListener(this);
-        Main.map.mapView.addMouseListener(this);
-        Main.map.mapView.addTemporaryLayer(this);
+        if (sourceLayer == null) {
+            mv = null;
+            return;
+        }
+        hookedMapMode = (SelectAction)Main.map.mapMode;
+        mv.removeMouseMotionListener(hookedMapMode);
+        mv.removeMouseListener(hookedMapMode);
+        oldCursor = mv.getCursor();
+        mv.setCursor(cursor);
+
+        mv.addMouseMotionListener(this);
+        mv.addMouseListener(this);
+        mv.addTemporaryLayer(this);
+        hookActive = true;
     }
 
-    @Override
-    public void exitMode() {
-        super.exitMode();
-        Main.map.mapView.removeTemporaryLayer(this);
-        Main.map.mapView.removeMouseListener(this);
-        Main.map.mapView.removeMouseMotionListener(this);
+    public void deactivateHook() {
+        if (!hookActive) return;
+
+        mv.removeTemporaryLayer(this);
+        mv.removeMouseListener(this);
+        mv.removeMouseMotionListener(this);
+
+        if (Main.map != null && Main.map.mapView == mv && Main.map.mapMode == hookedMapMode) {
+            mv.addMouseMotionListener(hookedMapMode);
+            mv.addMouseListener(hookedMapMode);
+            mv.setCursor(oldCursor);
+        }
+        if (highlighted != null) {
+            highlighted = null;
+            if (Main.map != null) Main.map.repaint();
+        }
+
+        mv = null;
+        oldCursor = null;
+        hookedMapMode = null;
         sourceLayer = null;
+        hookActive = false;
     }
 
     @Override
     public void mouseMoved(MouseEvent e) {
-        super.mouseMoved(e);
         if (sourceLayer == null) return;
         updateHighlighting(e.getPoint());
         if (highlightChanged) Main.map.repaint();
     }
-    
+
 
     @Override
     public void mouseClicked(MouseEvent e) {
-        super.mouseClicked(e);
         if (sourceLayer == null) return;
         DataSet destLayer = Main.main.getCurrentDataSet();
         if (destLayer == null) return;
         updateHighlighting(e.getPoint());
         if (highlighted == null) return;
-        
+
         PrimitiveDeepCopy copy = new PrimitiveDeepCopy(Collections.singleton(highlighted));
         new PasteAction().pasteData(copy, (Layer)null, new ActionEvent(this, 0, ""));
     }
 
-    @Override
-    public boolean layerIsSupported(Layer l) {
-        return l instanceof OsmDataLayer;
-    }
     private BBox getBBox(Point p, int snapDistance) {
         return new BBox(Main.map.mapView.getLatLon(p.x - snapDistance, p.y - snapDistance),
                 Main.map.mapView.getLatLon(p.x + snapDistance, p.y + snapDistance));
@@ -119,7 +165,7 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
         OsmPrimitive result = null;
         int snapDistance = NavigatableComponent.PROP_SNAP_DISTANCE.get();
         double nearestDistanceSq = snapDistance*snapDistance;
-        
+
         MapView mv = Main.map.mapView;
         for (Node n : sourceLayer.searchNodes(getBBox(p, snapDistance))) {
             if (predicate.evaluate(n) && mv.getPoint(n).distanceSq(p) < nearestDistanceSq){
@@ -151,7 +197,7 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
 
                 if (perDistSq < nearestDistanceSq && a < c + nearestDistanceSq && b < c + nearestDistanceSq) {
                     result = w;
-                    nearestDistanceSq = perDistSq; 
+                    nearestDistanceSq = perDistSq;
                     break;
                 }
                 lastN = n;
@@ -168,7 +214,7 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
             highlightChanged = true;
         }
     }
-    
+
     @Override
     public void paint(final Graphics2D g, final MapView mv, final Bounds bbox) {
         if (highlighted == null) {
@@ -203,5 +249,41 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
             }
         });
         highlightChanged = false;
+    }
+
+    private boolean ctrlShiftDown = false;
+    @Override
+    public void eventDispatched(AWTEvent event) {
+        if (!(event instanceof KeyEvent))
+            return;
+        KeyEvent ev = (KeyEvent)event;
+        int modifiers = ev.getModifiersEx();
+        boolean ctrlShiftDown = (modifiers & (KeyEvent.CTRL_DOWN_MASK | KeyEvent.SHIFT_DOWN_MASK)) != 0;
+        if (ctrlShiftDown && !this.ctrlShiftDown) {
+            activateHook();
+        } else if (this.ctrlShiftDown && !ctrlShiftDown) {
+            deactivateHook();
+        }
+        this.ctrlShiftDown = ctrlShiftDown;
+    }
+
+    @Override
+    public void mousePressed(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseReleased(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseEntered(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseExited(MouseEvent e) {
+
+    }
+    @Override
+    public void mouseDragged(MouseEvent e) {
     }
 }
