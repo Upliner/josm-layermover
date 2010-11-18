@@ -42,9 +42,9 @@ import org.openstreetmap.josm.tools.Shortcut;
 
 public class LayerMoveAction extends MapMode implements MapViewPaintable {
     DataSet sourceLayer;
-    private List<OsmPrimitive> highlighted = Collections.emptyList();
+    private OsmPrimitive highlighted = null;
     private boolean highlightChanged;
-
+   
     public LayerMoveAction(MapFrame mapFrame) {
         super(tr("Calque"), "calque", tr("Move objects from inactive layer to active"),
                 Shortcut.registerShortcut("mapmode:calque",
@@ -92,6 +92,7 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
         updateHighlighting(e.getPoint());
         if (highlightChanged) Main.map.repaint();
     }
+    
 
     @Override
     public void mouseClicked(MouseEvent e) {
@@ -100,8 +101,9 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
         DataSet destLayer = Main.main.getCurrentDataSet();
         if (destLayer == null) return;
         updateHighlighting(e.getPoint());
-
-        PrimitiveDeepCopy copy = new PrimitiveDeepCopy(highlighted);
+        if (highlighted == null) return;
+        
+        PrimitiveDeepCopy copy = new PrimitiveDeepCopy(Collections.singleton(highlighted));
         new PasteAction().pasteData(copy, (Layer)null, new ActionEvent(this, 0, ""));
     }
 
@@ -113,24 +115,24 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
         return new BBox(Main.map.mapView.getLatLon(p.x - snapDistance, p.y - snapDistance),
                 Main.map.mapView.getLatLon(p.x + snapDistance, p.y + snapDistance));
     }
-    private List<OsmPrimitive> getSourceLayerPrimitives(Point p, Predicate<OsmPrimitive> predicate) {
-        LinkedList<OsmPrimitive> result = new LinkedList<OsmPrimitive>();
+    private OsmPrimitive getNearestSourceLayerPrimitive(Point p, Predicate<OsmPrimitive> predicate) {
+        OsmPrimitive result = null;
+        int snapDistance = NavigatableComponent.PROP_SNAP_DISTANCE.get();
+        double nearestDistanceSq = snapDistance*snapDistance;
+        
         MapView mv = Main.map.mapView;
-        for (Node n : sourceLayer.searchNodes(getBBox(p, NavigatableComponent.PROP_SNAP_DISTANCE.get()))) {
-            if (predicate.evaluate(n)){
-                result.add(n);
+        for (Node n : sourceLayer.searchNodes(getBBox(p, snapDistance))) {
+            if (predicate.evaluate(n) && mv.getPoint(n).distanceSq(p) < nearestDistanceSq){
+                result = n;
+                nearestDistanceSq = mv.getPoint(n).distanceSq(p);
             }
         }
-        if (!result.isEmpty()) return result;
+        if (result != null) return result;
 
-        double snapDistanceSq = NavigatableComponent.PROP_SNAP_DISTANCE.get();
-        snapDistanceSq *= snapDistanceSq;
         for (Way w : sourceLayer.searchWays(getBBox(p, NavigatableComponent.PROP_SNAP_DISTANCE.get()))) {
             if (!predicate.evaluate(w)) continue;
             Node lastN = null;
-            int i = -2;
             for (Node n : w.getNodes()) {
-                i++;
                 if (n.isDeleted() || n.isIncomplete()) { //FIXME: This shouldn't happen, raise exception?
                     continue;
                 }
@@ -147,8 +149,9 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
 
                 double perDistSq = a - (a - b + c) * (a - b + c) / 4 / c;
 
-                if (perDistSq < snapDistanceSq && a < c + snapDistanceSq && b < c + snapDistanceSq) {
-                    result.add(w);
+                if (perDistSq < nearestDistanceSq && a < c + nearestDistanceSq && b < c + nearestDistanceSq) {
+                    result = w;
+                    nearestDistanceSq = perDistSq; 
                     break;
                 }
                 lastN = n;
@@ -159,44 +162,46 @@ public class LayerMoveAction extends MapMode implements MapViewPaintable {
     }
 
     private void updateHighlighting(Point point) {
-        List<OsmPrimitive> newHighlight = getSourceLayerPrimitives(point, OsmPrimitive.isUsablePredicate);
-        if (!highlighted.equals(newHighlight)) {
+        OsmPrimitive newHighlight = getNearestSourceLayerPrimitive(point, OsmPrimitive.isUsablePredicate);
+        if (highlighted != newHighlight) {
             highlighted = newHighlight;
             highlightChanged = true;
         }
     }
-
+    
     @Override
     public void paint(final Graphics2D g, final MapView mv, final Bounds bbox) {
+        if (highlighted == null) {
+            highlightChanged = false;
+            return;
+        }
         g.setColor(PaintColors.HIGHLIGHT.get());
         g.setStroke(new BasicStroke(3, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
         final int nodeSize = MapPaintSettings.INSTANCE.getSelectedNodeSize();
-        for (OsmPrimitive p : highlighted) {
-            p.visit(new AbstractVisitor() {
-                @Override
-                public void visit(Node n) {
-                    Point p = mv.getPoint(n);
-                    g.fillRect(p.x - nodeSize/2, p.y - nodeSize/2, nodeSize, nodeSize);
+        highlighted.visit(new AbstractVisitor() {
+            @Override
+            public void visit(Node n) {
+                Point p = mv.getPoint(n);
+                g.fillRect(p.x - nodeSize/2, p.y - nodeSize/2, nodeSize, nodeSize);
+            }
+            @Override
+            public void visit(Way w) {
+                List<Node> nodes = w.getNodes();
+                if (nodes.isEmpty()) return;
+                GeneralPath path = new GeneralPath();
+                Iterator<Node> iterator = nodes.iterator();
+                Point2D point = mv.getPoint2D(iterator.next());
+                path.moveTo(point.getX(), point.getY());
+                while (iterator.hasNext()) {
+                    point = mv.getPoint2D(iterator.next());
+                    path.lineTo(point.getX(), point.getY());
                 }
-                @Override
-                public void visit(Way w) {
-                    List<Node> nodes = w.getNodes();
-                    if (nodes.isEmpty()) return;
-                    GeneralPath path = new GeneralPath();
-                    Iterator<Node> iterator = nodes.iterator();
-                    Point2D point = mv.getPoint2D(iterator.next());
-                    path.moveTo(point.getX(), point.getY());
-                    while (iterator.hasNext()) {
-                        point = mv.getPoint2D(iterator.next());
-                        path.lineTo(point.getX(), point.getY());
-                    }
-                    g.draw(path);
-                }
-                @Override
-                public void visit(Relation e) {
-                }
-            });
-        }
+                g.draw(path);
+            }
+            @Override
+            public void visit(Relation e) {
+            }
+        });
         highlightChanged = false;
     }
 }
