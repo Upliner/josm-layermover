@@ -325,7 +325,7 @@ implements MapModeChangeListener,  MapViewPaintable, AWTEventListener, MouseMoti
             return;
         KeyEvent ev = (KeyEvent)event;
         int modifiers = ev.getModifiersEx();
-        boolean ctrlShiftDown = (modifiers & (KeyEvent.CTRL_DOWN_MASK | KeyEvent.SHIFT_DOWN_MASK)) != 0;
+        boolean ctrlShiftDown = (~modifiers & (KeyEvent.CTRL_DOWN_MASK | KeyEvent.SHIFT_DOWN_MASK)) == 0;
         if (ctrlShiftDown && !this.ctrlShiftDown) {
             activateHook();
         } else if (this.ctrlShiftDown && !ctrlShiftDown) {
