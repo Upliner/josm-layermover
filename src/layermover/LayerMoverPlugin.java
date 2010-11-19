@@ -236,7 +236,7 @@ implements MapModeChangeListener,  MapViewPaintable, AWTEventListener, MouseMoti
         MapView mv = Main.map.mapView;
         for (OsmDataLayer layer : sourceLayers) {
             for (Node n : layer.data.searchNodes(getBBox(p, snapDistance))) {
-                if (predicate.evaluate(n) && n.isTagged() && mv.getPoint(n).distanceSq(p) < nearestDistanceSq){
+                if (predicate.evaluate(n) && mv.getPoint(n).distanceSq(p) < nearestDistanceSq){
                     result = n;
                     nearestDistanceSq = mv.getPoint(n).distanceSq(p);
                 }
